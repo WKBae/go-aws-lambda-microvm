@@ -1,0 +1,55 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go test (${{ matrix.os }}, ${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+          - os: linux
+            arch: arm64
+            runner: ubuntu-26.04-arm
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+          - os: windows
+            arch: arm64
+            runner: windows-11-arm
+          - os: macos
+            arch: amd64
+            runner: macos-26-intel
+          - os: macos
+            arch: arm64
+            runner: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify module
+        run: go mod tidy && git diff --exit-code -- go.mod go.sum
+
+      - name: Run tests
+        run: go test ./...
