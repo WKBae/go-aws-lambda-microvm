@@ -18,69 +18,162 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
+// BuildImageInput describes a MicroVM image build from an fs.FS.
+//
+// BuildImage packages FS into a zip artifact, uploads it to S3, and calls
+// CreateMicrovmImage with the resulting s3:// URI. The selected Root must
+// contain a Dockerfile at its top level because Lambda executes that Dockerfile
+// while creating the MicroVM image snapshot.
 type BuildImageInput struct {
+	// Name is the MicroVM image name. It must be unique within the AWS account
+	// and is passed to CreateMicrovmImageInput.Name.
 	Name string
-	FS   fs.FS
+	// FS is the source filesystem to package into the MicroVM image artifact.
+	// It may be an os.DirFS, embed.FS, fstest.MapFS, or any other fs.FS.
+	FS fs.FS
+	// Root is the directory inside FS to package. The default is ".". The
+	// Dockerfile must be located at Root/Dockerfile and is written to the zip
+	// root as Dockerfile.
 	Root string
 
+	// ArtifactBucket overrides Config.ArtifactBucket for this build. The bucket
+	// should be in the same AWS Region as the MicroVM image build.
 	ArtifactBucket string
-	ArtifactKey    string
+	// ArtifactKey is the S3 object key for the generated zip artifact. If empty,
+	// BuildImage generates one from Config.ArtifactPrefix, Name, and a timestamp.
+	ArtifactKey string
 
+	// BaseImageARN overrides Config.BaseImageARN for this build. It must be the
+	// ARN of a Lambda-managed MicroVM base image.
 	BaseImageARN string
+	// BuildRoleARN overrides Config.BuildRoleARN for this build. Lambda assumes
+	// this role to download the S3 artifact and write build logs.
 	BuildRoleARN string
 
-	Description              string
-	EnvironmentVariables     map[string]string
-	Tags                     map[string]string
-	Hooks                    *types.Hooks
-	Logging                  types.Logging
-	ResourcesMiB             int32
+	// Description is an optional human-readable description for the image
+	// version created by this build.
+	Description string
+	// EnvironmentVariables are injected into the MicroVM runtime environment at
+	// image build time. Values are shared by all MicroVMs launched from the
+	// resulting image version.
+	EnvironmentVariables map[string]string
+	// Tags are attached to the created MicroVM image resource for organization,
+	// cost allocation, and IAM attribute-based access control.
+	Tags map[string]string
+	// Hooks configures build-time hooks such as ready and validate, and runtime
+	// hooks such as run, resume, suspend, and terminate. The application must
+	// listen on the configured hook port.
+	Hooks *types.Hooks
+	// Logging configures build-time and runtime CloudWatch Logs output, or
+	// disables logging. Leave nil to use the service default.
+	Logging types.Logging
+	// ResourcesMiB sets the baseline MicroVM memory in MiB. Lambda scales vCPU
+	// proportionally with memory and can vertically scale above this baseline.
+	// If zero, the service default is used.
+	ResourcesMiB int32
+	// AdditionalOsCapabilities grants additional Linux capabilities within the
+	// MicroVM isolation boundary. The current service-supported value is
+	// types.CapabilityAll.
 	AdditionalOsCapabilities []types.Capability
-	EgressNetworkConnectors  []string
+	// EgressNetworkConnectors lists network connector ARNs made available to
+	// MicroVMs launched from the image at runtime.
+	EgressNetworkConnectors []string
 
+	// Exclude is called for each fs.WalkDir entry before packaging. Returning
+	// true skips a file; returning true for a directory skips the entire subtree.
 	Exclude func(name string, entry fs.DirEntry) bool
 
-	Wait             bool
+	// Wait tells BuildImage to poll GetMicrovmImage until the image reaches
+	// CREATED or UPDATED, or until a failed terminal state is observed.
+	Wait bool
+	// WaitPollInterval overrides the Manager polling interval for this build.
+	// If zero, the Manager default is used.
 	WaitPollInterval time.Duration
 
+	// MutateCreateInput can adjust the generated AWS SDK input immediately before
+	// CreateMicrovmImage is called. Use it for advanced options not represented
+	// directly by this convenience API.
 	MutateCreateInput func(*lambdamicrovms.CreateMicrovmImageInput)
 }
 
+// BuildImageFromDirInput describes a MicroVM image build from a local
+// directory.
+//
+// It mirrors BuildImageInput but replaces FS and Root with Dir. BuildImageFromDir
+// packages os.DirFS(Dir), so Dir itself must contain the Dockerfile that should
+// appear at the artifact zip root.
 type BuildImageFromDirInput struct {
+	// Name is the MicroVM image name. It must be unique within the AWS account.
 	Name string
-	Dir  string
+	// Dir is the local directory to package. It must contain a Dockerfile at its
+	// top level.
+	Dir string
 
+	// ArtifactBucket overrides Config.ArtifactBucket for this build.
 	ArtifactBucket string
-	ArtifactKey    string
+	// ArtifactKey is the S3 object key for the generated zip artifact. If empty,
+	// BuildImageFromDir generates one from Config.ArtifactPrefix, Name, and a
+	// timestamp.
+	ArtifactKey string
 
+	// BaseImageARN overrides Config.BaseImageARN for this build.
 	BaseImageARN string
+	// BuildRoleARN overrides Config.BuildRoleARN for this build.
 	BuildRoleARN string
 
-	Description              string
-	EnvironmentVariables     map[string]string
-	Tags                     map[string]string
-	Hooks                    *types.Hooks
-	Logging                  types.Logging
-	ResourcesMiB             int32
+	// Description is an optional human-readable description for the image
+	// version created by this build.
+	Description string
+	// EnvironmentVariables are injected into the MicroVM runtime environment at
+	// image build time and are shared by MicroVMs launched from this version.
+	EnvironmentVariables map[string]string
+	// Tags are attached to the created MicroVM image resource.
+	Tags map[string]string
+	// Hooks configures build-time and runtime lifecycle hooks.
+	Hooks *types.Hooks
+	// Logging configures CloudWatch Logs output or disables logging.
+	Logging types.Logging
+	// ResourcesMiB sets the baseline MicroVM memory in MiB. If zero, the service
+	// default is used.
+	ResourcesMiB int32
+	// AdditionalOsCapabilities grants additional Linux capabilities inside the
+	// MicroVM isolation boundary.
 	AdditionalOsCapabilities []types.Capability
-	EgressNetworkConnectors  []string
+	// EgressNetworkConnectors lists runtime egress connector ARNs available to
+	// MicroVMs launched from this image.
+	EgressNetworkConnectors []string
 
+	// Exclude is called for each directory entry before packaging.
 	Exclude func(name string, entry fs.DirEntry) bool
 
-	Wait             bool
+	// Wait tells BuildImageFromDir to poll until the image is ready or failed.
+	Wait bool
+	// WaitPollInterval overrides the Manager polling interval for this build.
 	WaitPollInterval time.Duration
 
+	// MutateCreateInput can adjust the generated AWS SDK input immediately before
+	// CreateMicrovmImage is called.
 	MutateCreateInput func(*lambdamicrovms.CreateMicrovmImageInput)
 }
 
+// Image is the high-level result of a MicroVM image creation or lookup.
 type Image struct {
-	ARN         string
-	Name        string
-	Version     string
-	State       types.MicrovmImageState
+	// ARN is the AWS ARN of the MicroVM image resource.
+	ARN string
+	// Name is the MicroVM image name.
+	Name string
+	// Version is the image version created by CreateMicrovmImage, or the latest
+	// active version returned by GetMicrovmImage.
+	Version string
+	// State is the current MicroVM image lifecycle state, such as CREATING,
+	// CREATED, UPDATED, or CREATE_FAILED.
+	State types.MicrovmImageState
+	// ArtifactURI is the s3:// URI of the zip artifact uploaded by BuildImage or
+	// BuildImageFromDir. It is empty for images returned only from GetMicrovmImage.
 	ArtifactURI string
 }
 
+// BuildImageFromDir packages a local directory and creates a MicroVM image.
 func (m *Manager) BuildImageFromDir(ctx context.Context, in BuildImageFromDirInput) (*Image, error) {
 	if in.Dir == "" {
 		return nil, errors.New("microvm: BuildImageFromDirInput.Dir is required")
@@ -107,6 +200,11 @@ func (m *Manager) BuildImageFromDir(ctx context.Context, in BuildImageFromDirInp
 	})
 }
 
+// BuildImage packages an fs.FS, uploads it to S3, and creates a MicroVM image.
+//
+// The generated artifact zip contains files under Root at the zip root. Lambda
+// downloads the artifact, executes the Dockerfile, starts the application, waits
+// for configured image hooks, and snapshots the initialized MicroVM state.
 func (m *Manager) BuildImage(ctx context.Context, in BuildImageInput) (*Image, error) {
 	if in.Name == "" {
 		return nil, errors.New("microvm: BuildImageInput.Name is required")
@@ -197,11 +295,19 @@ func (m *Manager) BuildImage(ctx context.Context, in BuildImageInput) (*Image, e
 	return waited, nil
 }
 
+// WaitImageInput configures WaitImageReady polling.
 type WaitImageInput struct {
+	// ImageIdentifier is the MicroVM image name or ARN to pass to GetMicrovmImage.
 	ImageIdentifier string
-	PollInterval    time.Duration
+	// PollInterval is the delay between polling attempts. If zero, the Manager
+	// default is used.
+	PollInterval time.Duration
 }
 
+// WaitImageReady polls GetMicrovmImage until the image is ready or failed.
+//
+// CREATED and UPDATED are treated as ready states. CREATE_FAILED,
+// UPDATE_FAILED, DELETE_FAILED, and DELETED are treated as terminal failures.
 func (m *Manager) WaitImageReady(ctx context.Context, in WaitImageInput) (*Image, error) {
 	if in.ImageIdentifier == "" {
 		return nil, errors.New("microvm: image identifier is required")
